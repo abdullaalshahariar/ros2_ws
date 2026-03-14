@@ -1,0 +1,7 @@
+string command
+string x
+string y
+string action
+---
+bool success
+string msg
