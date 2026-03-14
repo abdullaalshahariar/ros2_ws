@@ -18,9 +18,17 @@ class ArucoManager(Node):
             callback=self.service_callback
         )
 
-        self.aruco_sub = None
+        #creating subscriber for aruco detections
+        self.aruco_sub = self.create_subscription(
+            String,
+            'aruco_detections',
+            self.aruco_callback,
+            10
+        )
+        self.detections = None
 
         #goto goal
+        self.current_status = "idle"
         self._action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self._goal_handle = None
         self.get_logger().info('Waiting for Nav2 action server...')
@@ -41,22 +49,6 @@ class ArucoManager(Node):
                 self.send_goal(x, y)
                 response.success = True
                 response.msg = f"Sent navigation goal to x: {x}, y: {y}"
-            
-            elif command == "aruco" and action == "start":
-                if self.aruco_sub is None:
-                    self.aruco_sub = self.create_subscription(
-                        String,
-                        'aruco_detections',
-                        self.aruco_callback,
-                        10
-                    )
-                    response.success = True
-                    response.msg = "Started ArUco marker detection."
-                else:
-                    response.success = False
-                    response.msg = "something went wrong with aruco detection"
-
-                # pass
 
             elif action == 'stop':
                 self.stop_goal()
@@ -73,6 +65,9 @@ class ArucoManager(Node):
         return response
 
     def aruco_callback(self, msg):
+        for det in msg.data:
+            if det not in self.detections:
+                self.detections.append(det)
         print("Received ArUco detection: ", msg.data)
     
 
@@ -118,10 +113,13 @@ class ArucoManager(Node):
         status = future.result().status
         
         if status == 4:  
+            self.current_status = "reached"
             self.get_logger().info('Goal reached successfully!')
-        elif status == 5:  
+        elif status == 5:
+            self.current_status = "canceled"  
             self.get_logger().warn('Goal was canceled')
         elif status == 6: 
+            self.current_status = "aborted"
             self.get_logger().error('Goal was aborted')
         else:
             self.get_logger().info(f'Navigation finished with status: {status}')
@@ -149,6 +147,15 @@ def main():
     node = ArucoManager()
     try:
         rclpy.spin(node)
+
+
+        #going to aruco
+        if node.current_status == "reached" and node.detections is not None:
+            for det in node.detections:
+                x, y = det
+                node.send_goal(x, y)
+
+                
     except KeyboardInterrupt:
         pass
     finally:
