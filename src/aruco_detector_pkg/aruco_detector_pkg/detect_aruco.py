@@ -8,6 +8,7 @@ from sensor_msgs.msg import Image, CameraInfo
 # from cv_bridge import CvBridge
 from rclpy.qos import qos_profile_sensor_data
 from std_msgs.msg import String
+from nav_msgs.msg import Odometry
 
 
 class ArucoDetector(Node):
@@ -21,7 +22,8 @@ class ArucoDetector(Node):
                 ("marker_size", 0.175),
                 ("aruco_dict_type", "DICT_4X4_250"),
                 ("image_topic_name", "/zed/zed_node/rgb/color/rect/image"),
-                ("camera_info_topic", "/zed/zed_node/rgb/color/rect/camera_info")
+                ("camera_info_topic", "/zed/zed_node/rgb/color/rect/camera_info"),
+                ("odom_topic", "/odom")
             ]
         )
 
@@ -29,12 +31,16 @@ class ArucoDetector(Node):
         self.aruco_dict_type = self.get_parameter("aruco_dict_type").get_parameter_value().string_value
         self.image_topic_name = self.get_parameter("image_topic_name").get_parameter_value().string_value
         self.camera_info_topic_name = self.get_parameter("camera_info_topic").get_parameter_value().string_value
+        self.odom_topic_name = self.get_parameter("odom_topic").get_parameter_value().string_value
 
         #debug
         self.get_logger().info(f'Marker size is set to: {self.marker_size}')
         self.get_logger().info(f'Aruco dict type: {self.aruco_dict_type}')
         self.get_logger().info(f'Image topic name: {self.image_topic_name}')
         self.get_logger().info(f'Camera info topic name: {self.camera_info_topic_name}')
+        self.get_logger().info(f'Odometry topic name: {self.odom_topic_name}')
+
+        self.visualization_enabled = True
 
         #subscriber for camera_matrix and dist_coeffs
         self.camera_info_subscriber = self.create_subscription(
@@ -57,7 +63,17 @@ class ArucoDetector(Node):
             qos_profile=qos_profile_sensor_data
         )
         self.get_logger().info(f'Subscribed to {self.image_topic_name}')
-        
+
+        #subscribe for odometry
+        self.odom_subscriber = self.create_subscription(
+            msg_type=Odometry,
+            topic=self.odom_topic_name,
+            callback=self.odom_callback,
+            qos_profile=qos_profile_sensor_data
+        )
+        self.odom_x = 0
+        self.odom_y = 0
+        self.odom_z = 0
 
         #required to convert between ROS and OpenCV images
         # self.bridge = CvBridge()
@@ -74,6 +90,22 @@ class ArucoDetector(Node):
         #publishes at 1Hz
         self.timer = self.create_timer(1, self.publisher_callback)
     
+    def odom_callback(self, msg):
+        try:
+            self.odom_x = msg.pose.pose.position.x
+            self.odom_y = msg.pose.pose.position.y
+            self.odom_z = msg.pose.pose.position.z
+            if self.detections is not None:
+                for det in self.detections:
+                    det["position"][0] += self.odom_x
+                    det["position"][1] += self.odom_y
+                    det["position"][2] += self.odom_z
+                
+            self.get_logger().info(f'Received odometry: x={self.odom_x}, y={self.odom_y}, z={self.odom_z}')
+        except Exception as e:
+            self.get_logger().error(f'Error processing odometry data: {e}')
+
+
     def camera_info_callback(self, msg):
         try:
             self.camera_matrix = np.array(msg.k, dtype=np.float32).reshape((3, 3))
@@ -127,8 +159,14 @@ class ArucoDetector(Node):
                 print(f"Marker ID {det['id']} distance: {distance:.3f} m")
 
             self.detections = detections #making result available
-            cv2.imshow("Aruco Detection", current_frame)
-            cv2.waitKey(1)
+
+            if self.visualization_enabled:
+                try:
+                    cv2.imshow("Aruco Detection", current_frame)
+                    cv2.waitKey(1)
+                except cv2.error as e:
+                    self.visualization_enabled = False
+                    self.get_logger().warn(f'OpenCV HighGUI unavailable; disabling visualization: {e}')
         except Exception as e:
             self.get_logger().error(f'Detection failed: {e}')
 
@@ -139,6 +177,16 @@ class ArucoDetector(Node):
             self.publisher.publish(msg)
             self.get_logger().info(f'Published detections: {msg.data}')
 
+    def _create_detector_parameters(self):
+        if hasattr(cv2.aruco, 'DetectorParameters'):
+            return cv2.aruco.DetectorParameters()
+        if hasattr(cv2.aruco, 'DetectorParameters_create'):
+            return cv2.aruco.DetectorParameters_create()
+        raise AttributeError(
+            "Your OpenCV ArUco module does not provide DetectorParameters APIs. "
+            "Install opencv-contrib-python matching your Python/ROS environment."
+        )
+
 
     def detect_aruco(self, frame, 
                     camera_matrix,
@@ -148,8 +196,7 @@ class ArucoDetector(Node):
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_type)
-        # parameters = cv2.aruco.DetectorParameters_create() # Use _create() for older 4.x
-        parameters = cv2.aruco.DetectorParameters() # Use constructor for newer 5.x
+        parameters = self._create_detector_parameters()
 
         # 1. Detection (The part that usually works)
         corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
@@ -181,9 +228,9 @@ class ArucoDetector(Node):
                     x, y, z = tvec.flatten()
                     detections.append({
                         "id": int(ids[i][0]),
-                        "position": (z, -x, -y), #analogous to ros2
-                        "rvec": rvec,
-                        "tvec": tvec
+                        "position": [z, -x, -y], #analogous to ros2
+                        # "rvec": rvec,
+                        # "tvec": tvec
                     })
 
                     # Draw the axes so you can see it's working
@@ -203,8 +250,7 @@ class ArucoDetector(Node):
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_type)
-        # parameters = cv2.aruco.DetectorParameters_create()
-        parameters = cv2.aruco.DetectorParameters() # Use constructor for newer 5.x
+        parameters = self._create_detector_parameters()
 
         corners, ids, _ = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
         detections = []
@@ -225,9 +271,9 @@ class ArucoDetector(Node):
                 x, y, z = tvec.flatten()
                 detections.append({
                     "id": int(ids[i][0]),
-                    "position": (z, -x, -y),
-                    "rvec": rvec,
-                    "tvec": tvec
+                    "position": [z, -x, -y], #analogous to ros2
+                    # "rvec": rvec,
+                    # "tvec": tvec
                 })
 
         return detections, frame
@@ -242,8 +288,17 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if hasattr(aruco_detector_node, 'visualization_enabled') and aruco_detector_node.visualization_enabled:
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                pass
         aruco_detector_node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
 
 if __name__ == '__main__':
-    main() 
+    main()

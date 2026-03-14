@@ -2,5 +2,6 @@ aruco_detector:
   ros__parameters:
     camera_info_topic: "/zed/zed_node/rgb/color/rect/camera_info"
     image_topic: "/zed/zed_node/rgb/color/rect/image"
+    odom_topic: "/obom"
     marker_length: 0.175
     aruco_dict_type: "DICT_4X4_250"
